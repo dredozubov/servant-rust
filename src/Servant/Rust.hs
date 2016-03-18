@@ -5,6 +5,8 @@
 {-# LANGUAGE MultiParamTypeClasses #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE QuasiQuotes #-}
+{-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE TypeOperators #-}
 {-# LANGUAGE ViewPatterns #-}
 {-# LANGUAGE UndecidableInstances #-}
@@ -28,35 +30,46 @@ data Rust
 rust :: Proxy Rust
 rust = Proxy
 
-instance HasForeignType Rust Int where
+instance HasForeignType Rust Text Int where
   -- FIXME: should probably depend on arch
-  typeFor _ _ = "i32"
+  typeFor _ _ _ = "i32"
 
-instance HasForeignType Rust Bool where
-  typeFor _ _ = "std::bool"
+instance HasForeignType Rust Text Bool where
+  typeFor _ _ _ = "std::bool"
 
-instance {-# OVERLAPPING #-} HasForeignType Rust [Char] where
-  typeFor _ _ = "std::string"
+instance
+  {-# OVERLAPPING #-}
+  HasForeignType Rust Text [Char] where
+    typeFor _ _ _ = "std::string"
 
-instance HasForeignType Rust Text where
-  typeFor _ _ = "std::string"
+instance HasForeignType Rust Text Text where
+  typeFor _ _ _ = "std::string"
 
 -- instances can overlap because of dreaded strings
-instance {-# OVERLAPPABLE #-} (FromJSON t, ToJSON t, HasForeignType Rust t)
-  =>  HasForeignType Rust [t] where
-    typeFor rust layout = "Vec<" <> typeFor rust layout <> ">"
+instance
+  {-# OVERLAPPABLE #-}
+  ( ftype ~ Text
+  , FromJSON t
+  , ToJSON t
+  , HasForeignType Rust ftype t)
+    =>  HasForeignType Rust ftype [t] where
+      typeFor rust ft layout = "Vec<" <> typeFor rust ft layout <> ">"
 
 type BaseURL = Text
 
 rustForAPI
-  :: (HasForeign Rust api, GenerateList (Foreign api))
+  :: ( ftype ~ Text
+     , HasForeign Rust ftype api
+     , GenerateList ftype (Foreign ftype api))
   => Proxy api
   -> BaseURL
   -> Text
 rustForAPI api = rustForAPI' api Nothing
 
 rustForAPI'
-  :: (HasForeign Rust api, GenerateList (Foreign api))
+  :: ( ftype ~ Text
+     , HasForeign Rust ftype api
+     , GenerateList ftype (Foreign ftype api))
   => Proxy api
   -> Maybe Text -- type introductions
   -> BaseURL
@@ -70,24 +83,27 @@ rustForAPI' api typeIntros baseUrl = [text|
 
   ${clientFunctions reqs} |]
   where
-    reqs = listFromAPI rust api
+    reqs = listFromAPI rust (Proxy :: Proxy Text) api
 
 hyperMethod :: Method -> Text
 hyperMethod = over _tail toLower . decodeUtf8
 
-clientFunctions :: BaseURL -> [Req] -> Text
+clientFunctions :: BaseURL -> [Req Text] -> Text
 clientFunctions baseUrl = mconcat . map (clientFunction baseUrl)
 
-arguments :: Req -> Text
+arguments :: Req Text -> Text
 arguments (view (reqUrl . queryStr) -> captures)
   = [text|client: Client${captureArgs captures}|]
   where
-    captureArgs [] = mempty
+    captureArgs [] = ""
     captureArgs x
-      = intercalate ", "
-      . map (view (argName . to (\(a,t) -> a <> ": " <> t))) $ x
+      = ", "
+     <> (intercalate ", "
+      . map (view ( queryArgName
+                  . to (\a -> a ^. argPath <> ": " <> a ^. argType)))
+      $ x)
 
-clientFunction :: BaseURL -> Req -> Text
+clientFunction :: BaseURL -> Req Text -> Text
 clientFunction baseUrl req = [text|
 fn ${req ^. reqFuncName}(
         ${arguments req}
